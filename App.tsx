@@ -4,6 +4,7 @@ import { FileData, Message, ChatSession, SummaryMode, RangeFilter, PromptTemplat
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import FilePreviewModal from './components/FilePreviewModal';
+import DataVisualizer from './components/DataVisualizer';
 import { analyzeFiles, transcribeAudio, generateSpeech, decodeBase64Audio, decodeAudioBuffer, detectLanguage } from './services/gemini';
 
 const STORAGE_KEY = 'omni_doc_history_v1';
@@ -37,6 +38,7 @@ const App: React.FC = () => {
   const [summaryMode, setSummaryMode] = useState<SummaryMode>('standard');
   const [isSpeaking, setIsSpeaking] = useState<string | null>(null);
   const [previewFile, setPreviewFile] = useState<FileData | null>(null);
+  const [visualizingFile, setVisualizingFile] = useState<FileData | null>(null);
   const [rangeFilter, setRangeFilter] = useState<RangeFilter>({ min: null, max: null, isActive: false });
   const [config, setConfig] = useState({
     useThinking: false,
@@ -177,7 +179,6 @@ const App: React.FC = () => {
     const session = history.find(s => s.id === targetId);
     if (!session) return;
 
-    // We strip file contents for sharing if they are massive to avoid URL length issues
     const shareableSession = {
       ...session,
       files: session.files.map(f => ({
@@ -266,6 +267,7 @@ const App: React.FC = () => {
   const handleRemoveFile = (id: string) => {
     setFiles(prev => prev.filter(f => f.id !== id));
     if (previewFile?.id === id) setPreviewFile(null);
+    if (visualizingFile?.id === id) setVisualizingFile(null);
   };
 
   const stopAudio = () => {
@@ -450,6 +452,7 @@ The user has defined a safe range of [${minVal}] to [${maxVal}].
         onClearAll={() => setFiles([])}
         onScanFile={handleScanFile}
         onPreviewFile={setPreviewFile}
+        onVisualizeFile={setVisualizingFile}
         history={history}
         currentSessionId={currentSessionId}
         onNewSession={createNewSession}
@@ -480,6 +483,7 @@ The user has defined a safe range of [${minVal}] to [${maxVal}].
         onShareSession={() => handleShareSession()}
       />
       <FilePreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />
+      <DataVisualizer file={visualizingFile} onClose={() => setVisualizingFile(null)} />
     </div>
   );
 };

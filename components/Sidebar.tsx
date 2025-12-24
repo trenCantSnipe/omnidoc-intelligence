@@ -9,6 +9,7 @@ interface SidebarProps {
   onClearAll: () => void;
   onScanFile?: (file: FileData) => void;
   onPreviewFile?: (file: FileData) => void;
+  onVisualizeFile?: (file: FileData) => void;
   // History props
   history: ChatSession[];
   currentSessionId: string;
@@ -25,6 +26,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   onClearAll,
   onScanFile,
   onPreviewFile,
+  onVisualizeFile,
   history,
   currentSessionId,
   onNewSession,
@@ -153,6 +155,7 @@ const Sidebar: React.FC<SidebarProps> = ({
             {files.map((file) => {
               const style = getFileStyle(file.mimeType);
               const isImage = file.mimeType.startsWith('image/');
+              const isSpreadsheet = file.mimeType.includes('csv') || file.mimeType.includes('spreadsheet') || file.mimeType.includes('excel');
               const isProcessing = file.uploadProgress !== undefined && file.uploadProgress < 100;
               
               return (
@@ -232,6 +235,18 @@ const Sidebar: React.FC<SidebarProps> = ({
                           title="OCR"
                         >
                           <i className="fa-solid fa-magnifying-glass-chart text-xs"></i>
+                        </button>
+                      )}
+                      {isSpreadsheet && onVisualizeFile && (
+                        <button 
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onVisualizeFile(file);
+                          }}
+                          className="p-1 text-slate-300 hover:text-emerald-500 transition-colors"
+                          title="Visualize"
+                        >
+                          <i className="fa-solid fa-chart-pie text-xs"></i>
                         </button>
                       )}
                     </div>
