@@ -1,5 +1,5 @@
 
-import React from 'react';
+import React, { useState } from 'react';
 import { FileData, ChatSession } from '../types';
 
 interface SidebarProps {
@@ -15,6 +15,7 @@ interface SidebarProps {
   onNewSession: () => void;
   onSelectSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
+  onShareSession: (id: string) => boolean | undefined;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({ 
@@ -28,8 +29,11 @@ const Sidebar: React.FC<SidebarProps> = ({
   currentSessionId,
   onNewSession,
   onSelectSession,
-  onDeleteSession
+  onDeleteSession,
+  onShareSession
 }) => {
+  const [sharingId, setSharingId] = useState<string | null>(null);
+
   const getFileStyle = (mimeType: string) => {
     if (mimeType.includes('pdf')) {
       return { icon: 'fa-file-pdf', bg: 'bg-blue-50', text: 'text-blue-600', border: 'border-blue-100' };
@@ -51,6 +55,15 @@ const Sidebar: React.FC<SidebarProps> = ({
 
   const formatTime = (timestamp: number) => {
     return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
+  const handleShare = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    const success = onShareSession(id);
+    if (success) {
+      setSharingId(id);
+      setTimeout(() => setSharingId(null), 2000);
+    }
   };
 
   return (
@@ -86,7 +99,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                 }`}
               >
                 <div className={`text-sm ${currentSessionId === session.id ? 'text-blue-500' : 'text-slate-400'}`}>
-                  <i className="fa-solid fa-message"></i>
+                  <i className={`fa-solid ${session.id.startsWith('shared') ? 'fa-people-arrows' : 'fa-message'}`}></i>
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-xs font-semibold truncate">
@@ -96,15 +109,25 @@ const Sidebar: React.FC<SidebarProps> = ({
                     {session.files.length} files • {new Date(session.updatedAt).toLocaleDateString()}
                   </p>
                 </div>
-                <button 
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDeleteSession(session.id);
-                  }}
-                  className="p-1 opacity-0 group-hover:opacity-100 hover:text-red-500 transition-all"
-                >
-                  <i className="fa-solid fa-trash-can text-[10px]"></i>
-                </button>
+                
+                <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-all">
+                  <button 
+                    onClick={(e) => handleShare(e, session.id)}
+                    className={`p-1 hover:text-blue-500 ${sharingId === session.id ? 'text-blue-500' : ''}`}
+                    title="Copy Share Link"
+                  >
+                    <i className={`fa-solid ${sharingId === session.id ? 'fa-check' : 'fa-share-nodes'} text-[10px]`}></i>
+                  </button>
+                  <button 
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeleteSession(session.id);
+                    }}
+                    className="p-1 hover:text-red-500"
+                  >
+                    <i className="fa-solid fa-trash-can text-[10px]"></i>
+                  </button>
+                </div>
               </div>
             ))}
             {history.length === 0 && (

@@ -1,23 +1,43 @@
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { FileData, Message, ChatSession, SummaryMode } from './types';
+import { FileData, Message, ChatSession, SummaryMode, RangeFilter, PromptTemplate } from './types';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import FilePreviewModal from './components/FilePreviewModal';
 import { analyzeFiles, transcribeAudio, generateSpeech, decodeBase64Audio, decodeAudioBuffer, detectLanguage } from './services/gemini';
 
 const STORAGE_KEY = 'omni_doc_history_v1';
+const TEMPLATES_KEY = 'omni_doc_templates_v1';
+
+const DEFAULT_TEMPLATES: PromptTemplate[] = [
+  {
+    id: 'exec-sum',
+    name: 'Executive Summary',
+    description: 'High-level strategic overview for stakeholders.',
+    mode: 'concise',
+    prompt: 'Create an executive summary suitable for a CEO. Focus on strategic impact, financial implications, and major risks.'
+  },
+  {
+    id: 'tech-dive',
+    name: 'Technical Deep Dive',
+    description: 'Detailed analysis of architecture and specifications.',
+    mode: 'detailed',
+    prompt: 'Perform a comprehensive technical audit. Identify architecture patterns, specific technical constraints, and potential engineering debt.'
+  }
+];
 
 const App: React.FC = () => {
   const [history, setHistory] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>('');
   const [files, setFiles] = useState<FileData[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [templates, setTemplates] = useState<PromptTemplate[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [summaryMode, setSummaryMode] = useState<SummaryMode>('standard');
   const [isSpeaking, setIsSpeaking] = useState<string | null>(null);
   const [previewFile, setPreviewFile] = useState<FileData | null>(null);
+  const [rangeFilter, setRangeFilter] = useState<RangeFilter>({ min: null, max: null, isActive: false });
   const [config, setConfig] = useState({
     useThinking: false,
     useSearch: false,
@@ -25,32 +45,69 @@ const App: React.FC = () => {
     autoRead: false
   });
 
+  // 1. Initial Load from LocalStorage & Share Hydration
+  useEffect(() => {
+    // Check for Share Link
+    const params = new URLSearchParams(window.location.search);
+    const sharedData = params.get('share');
+    
+    // Load History
+    const saved = localStorage.getItem(STORAGE_KEY);
+    let initialHistory: ChatSession[] = [];
+    if (saved) {
+      try {
+        initialHistory = JSON.parse(saved);
+      } catch (e) {
+        console.error("Failed to parse history", e);
+      }
+    }
+
+    if (sharedData) {
+      try {
+        const decoded = JSON.parse(decodeURIComponent(escape(atob(sharedData))));
+        // Ensure ID uniqueness
+        decoded.id = `shared-${Math.random().toString(36).substring(7)}`;
+        decoded.updatedAt = Date.now();
+        decoded.name = `Shared: ${decoded.name}`;
+        
+        initialHistory = [decoded, ...initialHistory];
+        setHistory(initialHistory);
+        loadSession(decoded);
+        
+        // Clear URL without reload
+        window.history.replaceState({}, document.title, window.location.pathname);
+        alert("Shared session successfully imported to your workspace!");
+      } catch (e) {
+        console.error("Failed to decode shared data", e);
+        alert("This share link appears to be invalid or too large for the browser.");
+      }
+    } else {
+      setHistory(initialHistory);
+      if (initialHistory.length > 0) {
+        const last = initialHistory.sort((a, b) => b.updatedAt - a.updatedAt)[0];
+        loadSession(last);
+      } else {
+        createNewSession();
+      }
+    }
+
+    // Load Templates
+    const savedTemplates = localStorage.getItem(TEMPLATES_KEY);
+    if (savedTemplates) {
+      try {
+        setTemplates(JSON.parse(savedTemplates));
+      } catch (e) {
+        setTemplates(DEFAULT_TEMPLATES);
+      }
+    } else {
+      setTemplates(DEFAULT_TEMPLATES);
+    }
+  }, []);
+
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const audioContextRef = useRef<AudioContext | null>(null);
   const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
-
-  // 1. Initial Load from LocalStorage
-  useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        const parsedHistory: ChatSession[] = JSON.parse(saved);
-        setHistory(parsedHistory);
-        if (parsedHistory.length > 0) {
-          const last = parsedHistory.sort((a, b) => b.updatedAt - a.updatedAt)[0];
-          loadSession(last);
-        } else {
-          createNewSession();
-        }
-      } catch (e) {
-        console.error("Failed to parse history", e);
-        createNewSession();
-      }
-    } else {
-      createNewSession();
-    }
-  }, []);
 
   // 2. Sync Current Session with History & LocalStorage
   useEffect(() => {
@@ -72,12 +129,20 @@ const App: React.FC = () => {
     });
   }, [messages, files, currentSessionId]);
 
+  // Sync Templates
+  useEffect(() => {
+    if (templates.length > 0) {
+      localStorage.setItem(TEMPLATES_KEY, JSON.stringify(templates));
+    }
+  }, [templates]);
+
   const createNewSession = () => {
     const newId = Math.random().toString(36).substring(2, 15);
     setCurrentSessionId(newId);
     setFiles([]);
     setMessages([]);
     setSummaryMode('standard');
+    setRangeFilter({ min: null, max: null, isActive: false });
     stopAudio();
   };
 
@@ -85,6 +150,7 @@ const App: React.FC = () => {
     setCurrentSessionId(session.id);
     setFiles(session.files);
     setMessages(session.messages);
+    setRangeFilter({ min: null, max: null, isActive: false });
     stopAudio();
   };
 
@@ -106,6 +172,32 @@ const App: React.FC = () => {
     }
   };
 
+  const handleShareSession = (id?: string) => {
+    const targetId = id || currentSessionId;
+    const session = history.find(s => s.id === targetId);
+    if (!session) return;
+
+    // We strip file contents for sharing if they are massive to avoid URL length issues
+    const shareableSession = {
+      ...session,
+      files: session.files.map(f => ({
+        ...f,
+        content: f.content.length > 50000 ? '' : f.content 
+      }))
+    };
+
+    try {
+      const serialized = btoa(unescape(encodeURIComponent(JSON.stringify(shareableSession))));
+      const shareUrl = `${window.location.origin}${window.location.pathname}?share=${serialized}`;
+      navigator.clipboard.writeText(shareUrl);
+      return true;
+    } catch (e) {
+      console.error("Share failed", e);
+      alert("Session too large to share via link. Try a shorter conversation.");
+      return false;
+    }
+  };
+
   const addFiles = useCallback((selectedFiles: FileList | File[]) => {
     if (!selectedFiles) return;
 
@@ -116,7 +208,7 @@ const App: React.FC = () => {
 
       reader.onprogress = (event) => {
         if (event.lengthComputable) {
-          const progress = Math.round((event.loaded / event.total) * 90); // 90% for reading
+          const progress = Math.round((event.loaded / event.total) * 90);
           setFiles(prev => prev.map(f => f.id === fileId ? { ...f, uploadProgress: progress } : f));
         }
       };
@@ -136,7 +228,6 @@ const App: React.FC = () => {
 
         setFiles(prev => [...prev.filter(f => f.id !== fileId), newFile]);
 
-        // Language Detection for text-based files
         if (!file.type.startsWith('image/') && !file.type.startsWith('video/') && !file.type.startsWith('audio/')) {
           try {
             const lang = await detectLanguage(result);
@@ -149,7 +240,6 @@ const App: React.FC = () => {
         }
       };
       
-      // Placeholder for progress tracking
       setFiles(prev => [...prev, {
         id: fileId,
         name: file.name,
@@ -188,11 +278,11 @@ const App: React.FC = () => {
     setIsSpeaking(null);
   };
 
-  const handleSendMessage = async (text: string, targetFile?: FileData) => {
+  const handleSendMessage = async (text: string, template?: PromptTemplate) => {
     const userMessage: Message = {
       id: Math.random().toString(36).substring(7),
       role: 'user',
-      text,
+      text: template ? `[Using Template: ${template.name}] ${text}` : text,
       timestamp: Date.now()
     };
     
@@ -202,15 +292,32 @@ const App: React.FC = () => {
 
     try {
       let processedPrompt = text;
-      if (summaryMode === 'concise') {
-        processedPrompt = `Provide a concise, high-level summary. Focus on the most vital information only. \n\nUser Question: ${text}`;
-      } else if (summaryMode === 'detailed') {
-        processedPrompt = `Provide an extremely detailed and comprehensive analysis. Cover all nuances, data points, and context found in the files. \n\nUser Question: ${text}`;
-      } else if (summaryMode === 'insights') {
-        processedPrompt = `Extract key actionable insights and takeaways. Use bullet points for readability. Ignore minor details and focus on significance. \n\nUser Question: ${text}`;
+      const isSummaryRequest = summaryMode !== 'standard' || text.toLowerCase().includes('summarize') || !!template;
+
+      const activeMode = template ? template.mode : summaryMode;
+
+      if (rangeFilter.isActive) {
+        const minVal = rangeFilter.min !== null ? rangeFilter.min : "-Infinity";
+        const maxVal = rangeFilter.max !== null ? rangeFilter.max : "Infinity";
+        
+        processedPrompt = `CRITICAL DATA RANGE SCAN (OUTLIER DETECTION):
+The user has defined a safe range of [${minVal}] to [${maxVal}].
+- You MUST scan all numerical values in the provided files.
+- Flag any value strictly LESS THAN ${minVal} as: [🔴 BELOW RANGE]
+- Flag any value strictly GREATER THAN ${maxVal} as: [🔵 ABOVE RANGE]
+- PRIORITIZATION: You MUST start your response with a section titled '🚨 RANGE EXCEPTIONS REPORT'. List every outlier found with its value, source file, and label. If no outliers are found, state 'No range exceptions detected'.
+- Then, proceed with the user's specific request: ${text}`;
+      } else if (template) {
+        processedPrompt = `${template.prompt}\n\nUser Context/Query: ${text}`;
+      } else if (activeMode === 'concise') {
+        processedPrompt = `Provide exactly 5-7 bullet points summarizing the most critical data. DO NOT include any introductory or concluding text. Be sharp and direct. \n\nFocus on: ${text}`;
+      } else if (activeMode === 'insights') {
+        processedPrompt = `Extract the top 3 high-impact takeaways from these files. Present them in a bolded list format. Avoid technical jargon where possible. \n\nQuestion: ${text}`;
+      } else if (activeMode === 'detailed') {
+        processedPrompt = `Provide an exhaustive point-by-point breakdown of all files. Cover every data point found. Use nested bullet points for hierarchy. \n\nQuestion: ${text}`;
       }
 
-      const response = await analyzeFiles(files, processedPrompt, config);
+      const response = await analyzeFiles(files, processedPrompt, { ...config, isSummaryRequest });
       
       const assistantMessage: Message = {
         id: Math.random().toString(36).substring(7),
@@ -239,9 +346,24 @@ const App: React.FC = () => {
     }
   };
 
+  const handleSaveTemplate = (name: string, description: string, prompt: string) => {
+    const newTemplate: PromptTemplate = {
+      id: Math.random().toString(36).substring(7),
+      name,
+      description,
+      prompt,
+      mode: summaryMode
+    };
+    setTemplates(prev => [...prev, newTemplate]);
+  };
+
+  const handleDeleteTemplate = (id: string) => {
+    setTemplates(prev => prev.filter(t => t.id !== id));
+  };
+
   const handleScanFile = (file: FileData) => {
     if (file.mimeType.startsWith('image/')) {
-      handleSendMessage(`Extract all text from the image "${file.name}" using OCR. Please provide a clear transcription.`, file);
+      handleSendMessage(`Extract all text from the image "${file.name}" using OCR. Please provide a clear transcription.`, undefined);
     }
   };
 
@@ -333,6 +455,7 @@ const App: React.FC = () => {
         onNewSession={createNewSession}
         onSelectSession={handleSelectSession}
         onDeleteSession={handleDeleteSession}
+        onShareSession={handleShareSession}
       />
       <ChatArea 
         messages={messages}
@@ -349,6 +472,12 @@ const App: React.FC = () => {
         summaryMode={summaryMode}
         onModeChange={setSummaryMode}
         activeFiles={files}
+        rangeFilter={rangeFilter}
+        onRangeChange={setRangeFilter}
+        templates={templates}
+        onSaveTemplate={handleSaveTemplate}
+        onDeleteTemplate={handleDeleteTemplate}
+        onShareSession={() => handleShareSession()}
       />
       <FilePreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />
     </div>

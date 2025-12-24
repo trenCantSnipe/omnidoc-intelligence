@@ -8,6 +8,20 @@ export enum ModelType {
 
 export type SummaryMode = 'standard' | 'concise' | 'detailed' | 'insights';
 
+export interface PromptTemplate {
+  id: string;
+  name: string;
+  description: string;
+  prompt: string;
+  mode: SummaryMode;
+}
+
+export interface RangeFilter {
+  min: number | null;
+  max: number | null;
+  isActive: boolean;
+}
+
 export interface FileData {
   id: string;
   name: string;

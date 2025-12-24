@@ -8,7 +8,6 @@ const getAIClient = () => {
 
 export const detectLanguage = async (text: string): Promise<string> => {
   const ai = getAIClient();
-  // We use a small snippet for detection to save tokens and time
   const snippet = text.substring(0, 1000);
   const response = await ai.models.generateContent({
     model: ModelType.LITE,
@@ -26,6 +25,7 @@ export const analyzeFiles = async (
     useThinking?: boolean;
     useSearch?: boolean;
     useLite?: boolean;
+    isSummaryRequest?: boolean;
   }
 ): Promise<GenerateContentResponse> => {
   const ai = getAIClient();
@@ -47,6 +47,10 @@ export const analyzeFiles = async (
     return { text: `File: ${file.name}\nContent:\n${file.content}` };
   });
 
+  const systemInstruction = config.isSummaryRequest 
+    ? "You are a world-class executive assistant. Provide information in ultra-concise, high-density bullet points. Eliminate all introductory phrases (e.g., 'Here is the summary'). Use bold text for key terms. Focus on the bottom line."
+    : "You are a helpful and intelligent document analysis expert. Be precise and thorough.";
+
   const generationConfig: any = {};
   if (config.useThinking) {
     generationConfig.thinkingConfig = { thinkingBudget: 32768 };
@@ -67,6 +71,7 @@ export const analyzeFiles = async (
     },
     config: {
       ...generationConfig,
+      systemInstruction,
       tools: tools.length > 0 ? tools : undefined,
     },
   });
