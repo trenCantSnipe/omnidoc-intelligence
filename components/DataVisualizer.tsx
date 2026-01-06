@@ -2,7 +2,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { 
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, 
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Sector
 } from 'recharts';
 import { csvParse } from 'd3-dsv';
 import { FileData } from '../types';
@@ -14,12 +14,60 @@ interface DataVisualizerProps {
 
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4'];
 
+const renderActiveShape = (props: any) => {
+  const RADIAN = Math.PI / 180;
+  const { cx, cy, midAngle, innerRadius, outerRadius, startAngle, endAngle, fill, payload, percent, value } = props;
+  const sin = Math.sin(-RADIAN * midAngle);
+  const cos = Math.cos(-RADIAN * midAngle);
+  const sx = cx + (outerRadius + 10) * cos;
+  const sy = cy + (outerRadius + 10) * sin;
+  const mx = cx + (outerRadius + 30) * cos;
+  const my = cy + (outerRadius + 30) * sin;
+  const ex = mx + (cos >= 0 ? 1 : -1) * 22;
+  const ey = my;
+  const textAnchor = cos >= 0 ? 'start' : 'end';
+
+  return (
+    <g>
+      <text x={cx} y={cy} dy={8} textAnchor="middle" fill={fill} className="font-bold text-lg">
+        {payload.name}
+      </text>
+      <Sector
+        cx={cx}
+        cy={cy}
+        innerRadius={innerRadius}
+        outerRadius={outerRadius + 10}
+        startAngle={startAngle}
+        endAngle={endAngle}
+        fill={fill}
+      />
+      <Sector
+        cx={cx}
+        cy={cy}
+        startAngle={startAngle}
+        endAngle={endAngle}
+        innerRadius={outerRadius + 12}
+        outerRadius={outerRadius + 15}
+        fill={fill}
+      />
+      <path d={`M${sx},${sy}L${mx},${my}L${ex},${ey}`} stroke={fill} fill="none" />
+      <circle cx={ex} cy={ey} r={2} fill={fill} stroke="none" />
+      <text x={ex + (cos >= 0 ? 1 : -1) * 12} y={ey} textAnchor={textAnchor} fill="#333" className="text-xs font-bold">{`Value: ${value}`}</text>
+      <text x={ex + (cos >= 0 ? 1 : -1) * 12} y={ey} dy={18} textAnchor={textAnchor} fill="#999" className="text-[10px]">
+        {`(${(percent * 100).toFixed(2)}%)`}
+      </text>
+    </g>
+  );
+};
+
 const DataVisualizer: React.FC<DataVisualizerProps> = ({ file, onClose }) => {
   const [chartType, setChartType] = useState<'bar' | 'line' | 'pie'>('bar');
   const [xAxis, setXAxis] = useState<string>('');
-  const [yAxis, setYAxis] = useState<string>('');
+  const [selectedMeasures, setSelectedMeasures] = useState<string[]>([]);
+  const [hiddenMeasures, setHiddenMeasures] = useState<Set<string>>(new Set());
   const [parsedData, setParsedData] = useState<any[]>([]);
   const [columns, setColumns] = useState<string[]>([]);
+  const [pieActiveIndex, setPieActiveIndex] = useState<number>(0);
 
   useEffect(() => {
     if (file && file.content) {
@@ -30,9 +78,10 @@ const DataVisualizer: React.FC<DataVisualizerProps> = ({ file, onClose }) => {
           const cols = Object.keys(data[0]);
           setColumns(cols);
           setXAxis(cols[0]);
-          // Try to find a numeric column for Y axis
-          const numericCol = cols.find(c => !isNaN(Number(data[0][c]))) || cols[1] || cols[0];
-          setYAxis(numericCol);
+          // Find numeric columns
+          const numericCols = cols.filter(c => data.some(row => !isNaN(Number(row[c])) && row[c] !== ''));
+          const initialMeasure = numericCols.length > 0 ? numericCols[0] : (cols[1] || cols[0]);
+          setSelectedMeasures([initialMeasure]);
         }
       } catch (err) {
         console.error("Failed to parse CSV", err);
@@ -41,11 +90,34 @@ const DataVisualizer: React.FC<DataVisualizerProps> = ({ file, onClose }) => {
   }, [file]);
 
   const chartData = useMemo(() => {
-    return parsedData.map(d => ({
-      ...d,
-      [yAxis]: parseFloat(d[yAxis]) || 0
-    })).slice(0, 50); // Limit to 50 items for performance/readability
-  }, [parsedData, yAxis]);
+    return parsedData.map(d => {
+      const row: any = { ...d };
+      selectedMeasures.forEach(m => {
+        row[m] = parseFloat(d[m]) || 0;
+      });
+      return row;
+    }).slice(0, 50);
+  }, [parsedData, selectedMeasures]);
+
+  const handleLegendClick = (o: any) => {
+    const { dataKey } = o;
+    setHiddenMeasures(prev => {
+      const next = new Set(prev);
+      if (next.has(dataKey)) next.delete(dataKey);
+      else next.add(dataKey);
+      return next;
+    });
+  };
+
+  const toggleMeasure = (col: string) => {
+    setSelectedMeasures(prev => {
+      if (prev.includes(col)) {
+        if (prev.length === 1) return prev; // Keep at least one
+        return prev.filter(c => c !== col);
+      }
+      return [...prev, col];
+    });
+  };
 
   if (!file) return null;
 
@@ -108,20 +180,26 @@ const DataVisualizer: React.FC<DataVisualizerProps> = ({ file, onClose }) => {
             </div>
 
             <div>
-              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Measure (Y-Axis)</label>
-              <select 
-                value={yAxis}
-                onChange={(e) => setYAxis(e.target.value)}
-                className="w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-              >
-                {columns.map(col => <option key={col} value={col}>{col}</option>)}
-              </select>
+              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Measures (Y-Axis)</label>
+              <div className="space-y-2 max-h-48 overflow-y-auto pr-2 scrollbar-hide">
+                {columns.map(col => (
+                  <label key={col} className="flex items-center gap-3 p-2 bg-white rounded-lg border border-slate-100 hover:border-blue-200 cursor-pointer transition-all">
+                    <input 
+                      type="checkbox" 
+                      checked={selectedMeasures.includes(col)}
+                      onChange={() => toggleMeasure(col)}
+                      className="w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500"
+                    />
+                    <span className="text-xs font-semibold text-slate-600 truncate">{col}</span>
+                  </label>
+                ))}
+              </div>
             </div>
 
             <div className="pt-4 border-t border-slate-200">
-              <p className="text-[11px] text-slate-400 leading-relaxed italic">
-                <i className="fa-solid fa-circle-info mr-1"></i>
-                Visualizing top 50 records. Non-numeric values in the Measure column will be treated as 0.
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                <i className="fa-solid fa-lightbulb text-amber-400 mr-1"></i>
+                Tip: Click legend items on the chart to hide/show data series.
               </p>
             </div>
           </div>
@@ -147,8 +225,16 @@ const DataVisualizer: React.FC<DataVisualizerProps> = ({ file, onClose }) => {
                         contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
                         itemStyle={{ fontWeight: 700, fontSize: '12px' }}
                       />
-                      <Legend verticalAlign="top" height={36}/>
-                      <Bar dataKey={yAxis} fill="#3b82f6" radius={[4, 4, 0, 0]} />
+                      <Legend verticalAlign="top" height={36} onClick={handleLegendClick} wrapperStyle={{ cursor: 'pointer' }} />
+                      {selectedMeasures.map((m, i) => (
+                        <Bar 
+                          key={m} 
+                          dataKey={m} 
+                          fill={COLORS[i % COLORS.length]} 
+                          hide={hiddenMeasures.has(m)}
+                          radius={[4, 4, 0, 0]} 
+                        />
+                      ))}
                     </BarChart>
                   ) : chartType === 'line' ? (
                     <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 60 }}>
@@ -166,27 +252,40 @@ const DataVisualizer: React.FC<DataVisualizerProps> = ({ file, onClose }) => {
                         contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
                         itemStyle={{ fontWeight: 700, fontSize: '12px' }}
                       />
-                      <Legend verticalAlign="top" height={36}/>
-                      <Line type="monotone" dataKey={yAxis} stroke="#3b82f6" strokeWidth={3} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                      <Legend verticalAlign="top" height={36} onClick={handleLegendClick} wrapperStyle={{ cursor: 'pointer' }} />
+                      {selectedMeasures.map((m, i) => (
+                        <Line 
+                          key={m} 
+                          type="monotone" 
+                          dataKey={m} 
+                          stroke={COLORS[i % COLORS.length]} 
+                          hide={hiddenMeasures.has(m)}
+                          strokeWidth={3} 
+                          dot={{ r: 4 }} 
+                          activeDot={{ r: 6 }} 
+                        />
+                      ))}
                     </LineChart>
                   ) : (
                     <PieChart>
                       <Pie
-                        data={chartData.slice(0, 10)} // Pie charts get messy with too many slices
-                        dataKey={yAxis}
-                        nameKey={xAxis}
+                        activeIndex={pieActiveIndex}
+                        activeShape={renderActiveShape}
+                        data={chartData.slice(0, 10).map(d => ({ name: d[xAxis], value: d[selectedMeasures[0]] }))}
                         cx="50%"
                         cy="50%"
-                        outerRadius={150}
-                        fill="#8884d8"
-                        label={({name, percent}) => `${name} (${(percent * 100).toFixed(0)}%)`}
+                        innerRadius={80}
+                        outerRadius={120}
+                        paddingAngle={5}
+                        dataKey="value"
+                        onMouseEnter={(_, index) => setPieActiveIndex(index)}
                       >
-                        {chartData.map((entry, index) => (
+                        {chartData.slice(0, 10).map((entry, index) => (
                           <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                         ))}
                       </Pie>
                       <Tooltip />
-                      <Legend />
+                      <Legend verticalAlign="bottom" align="center" />
                     </PieChart>
                   )}
                 </ResponsiveContainer>

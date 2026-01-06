@@ -49,11 +49,9 @@ const App: React.FC = () => {
 
   // 1. Initial Load from LocalStorage & Share Hydration
   useEffect(() => {
-    // Check for Share Link
     const params = new URLSearchParams(window.location.search);
     const sharedData = params.get('share');
     
-    // Load History
     const saved = localStorage.getItem(STORAGE_KEY);
     let initialHistory: ChatSession[] = [];
     if (saved) {
@@ -67,7 +65,6 @@ const App: React.FC = () => {
     if (sharedData) {
       try {
         const decoded = JSON.parse(decodeURIComponent(escape(atob(sharedData))));
-        // Ensure ID uniqueness
         decoded.id = `shared-${Math.random().toString(36).substring(7)}`;
         decoded.updatedAt = Date.now();
         decoded.name = `Shared: ${decoded.name}`;
@@ -76,12 +73,9 @@ const App: React.FC = () => {
         setHistory(initialHistory);
         loadSession(decoded);
         
-        // Clear URL without reload
         window.history.replaceState({}, document.title, window.location.pathname);
-        alert("Shared session successfully imported to your workspace!");
       } catch (e) {
         console.error("Failed to decode shared data", e);
-        alert("This share link appears to be invalid or too large for the browser.");
       }
     } else {
       setHistory(initialHistory);
@@ -93,7 +87,6 @@ const App: React.FC = () => {
       }
     }
 
-    // Load Templates
     const savedTemplates = localStorage.getItem(TEMPLATES_KEY);
     if (savedTemplates) {
       try {
@@ -111,7 +104,6 @@ const App: React.FC = () => {
   const audioContextRef = useRef<AudioContext | null>(null);
   const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
-  // 2. Sync Current Session with History & LocalStorage
   useEffect(() => {
     if (!currentSessionId) return;
 
@@ -131,7 +123,6 @@ const App: React.FC = () => {
     });
   }, [messages, files, currentSessionId]);
 
-  // Sync Templates
   useEffect(() => {
     if (templates.length > 0) {
       localStorage.setItem(TEMPLATES_KEY, JSON.stringify(templates));
@@ -194,7 +185,6 @@ const App: React.FC = () => {
       return true;
     } catch (e) {
       console.error("Share failed", e);
-      alert("Session too large to share via link. Try a shorter conversation.");
       return false;
     }
   };
@@ -281,10 +271,44 @@ const App: React.FC = () => {
   };
 
   const handleSendMessage = async (text: string, template?: PromptTemplate) => {
+    if (!text.trim() && !template) return;
+    
+    // Command Parser
+    let finalPrompt = text;
+    let localSummaryMode = summaryMode;
+
+    if (text.startsWith('/')) {
+      const parts = text.split(' ');
+      const cmd = parts[0].toLowerCase();
+      const rest = parts.slice(1).join(' ');
+
+      switch(cmd) {
+        case '/summary':
+          localSummaryMode = 'concise';
+          finalPrompt = rest || 'Provide a high-density summary of all files.';
+          break;
+        case '/insights':
+          localSummaryMode = 'insights';
+          finalPrompt = rest || 'Extract the top strategic insights.';
+          break;
+        case '/detailed':
+          localSummaryMode = 'detailed';
+          finalPrompt = rest || 'Perform an exhaustive analysis.';
+          break;
+        case '/scan':
+          if (!rangeFilter.isActive) setRangeFilter(prev => ({ ...prev, isActive: true }));
+          finalPrompt = rest || 'Identify outliers and range exceptions.';
+          break;
+        case '/ocr':
+          finalPrompt = rest || 'Extract all readable text from any visual media using OCR.';
+          break;
+      }
+    }
+
     const userMessage: Message = {
       id: Math.random().toString(36).substring(7),
       role: 'user',
-      text: template ? `[Using Template: ${template.name}] ${text}` : text,
+      text: template ? `[Template: ${template.name}] ${text}` : text,
       timestamp: Date.now()
     };
     
@@ -293,30 +317,22 @@ const App: React.FC = () => {
     stopAudio();
 
     try {
-      let processedPrompt = text;
-      const isSummaryRequest = summaryMode !== 'standard' || text.toLowerCase().includes('summarize') || !!template;
-
-      const activeMode = template ? template.mode : summaryMode;
+      let processedPrompt = finalPrompt;
+      const isSummaryRequest = localSummaryMode !== 'standard' || finalPrompt.toLowerCase().includes('summarize') || !!template;
+      const activeMode = template ? template.mode : localSummaryMode;
 
       if (rangeFilter.isActive) {
         const minVal = rangeFilter.min !== null ? rangeFilter.min : "-Infinity";
         const maxVal = rangeFilter.max !== null ? rangeFilter.max : "Infinity";
-        
-        processedPrompt = `CRITICAL DATA RANGE SCAN (OUTLIER DETECTION):
-The user has defined a safe range of [${minVal}] to [${maxVal}].
-- You MUST scan all numerical values in the provided files.
-- Flag any value strictly LESS THAN ${minVal} as: [🔴 BELOW RANGE]
-- Flag any value strictly GREATER THAN ${maxVal} as: [🔵 ABOVE RANGE]
-- PRIORITIZATION: You MUST start your response with a section titled '🚨 RANGE EXCEPTIONS REPORT'. List every outlier found with its value, source file, and label. If no outliers are found, state 'No range exceptions detected'.
-- Then, proceed with the user's specific request: ${text}`;
+        processedPrompt = `CRITICAL DATA RANGE SCAN (OUTLIER DETECTION):\nThe user has defined a safe range of [${minVal}] to [${maxVal}].\n- You MUST scan all numerical values.\n- Flag LESS THAN ${minVal} as: [🔴 BELOW RANGE]\n- Flag GREATER THAN ${maxVal} as: [🔵 ABOVE RANGE]\n- START with '🚨 RANGE EXCEPTIONS REPORT'.\n- Then proceed: ${finalPrompt}`;
       } else if (template) {
-        processedPrompt = `${template.prompt}\n\nUser Context/Query: ${text}`;
+        processedPrompt = `${template.prompt}\n\nContext: ${finalPrompt}`;
       } else if (activeMode === 'concise') {
-        processedPrompt = `Provide exactly 5-7 bullet points summarizing the most critical data. DO NOT include any introductory or concluding text. Be sharp and direct. \n\nFocus on: ${text}`;
+        processedPrompt = `Provide 5-7 high-density bullet points summarizing the most critical data. No fluff.\n\nFocus: ${finalPrompt}`;
       } else if (activeMode === 'insights') {
-        processedPrompt = `Extract the top 3 high-impact takeaways from these files. Present them in a bolded list format. Avoid technical jargon where possible. \n\nQuestion: ${text}`;
+        processedPrompt = `Top 3 strategic takeaways. Present as Bold Headers with brief reasoning.\n\nRequest: ${finalPrompt}`;
       } else if (activeMode === 'detailed') {
-        processedPrompt = `Provide an exhaustive point-by-point breakdown of all files. Cover every data point found. Use nested bullet points for hierarchy. \n\nQuestion: ${text}`;
+        processedPrompt = `Exhaustive point-by-point breakdown. Cover every data point found.\n\nRequest: ${finalPrompt}`;
       }
 
       const response = await analyzeFiles(files, processedPrompt, { ...config, isSummaryRequest });
@@ -365,7 +381,7 @@ The user has defined a safe range of [${minVal}] to [${maxVal}].
 
   const handleScanFile = (file: FileData) => {
     if (file.mimeType.startsWith('image/')) {
-      handleSendMessage(`Extract all text from the image "${file.name}" using OCR. Please provide a clear transcription.`, undefined);
+      handleSendMessage(`/ocr Extract text from "${file.name}"`, undefined);
     }
   };
 
@@ -399,7 +415,6 @@ The user has defined a safe range of [${minVal}] to [${maxVal}].
         setIsRecording(true);
       } catch (err) {
         console.error("Microphone access denied:", err);
-        alert("Microphone access is required for transcription.");
       }
     }
   };
@@ -409,7 +424,6 @@ The user has defined a safe range of [${minVal}] to [${maxVal}].
       stopAudio();
       return;
     }
-    
     stopAudio();
     setIsSpeaking(messageId);
 
@@ -419,22 +433,16 @@ The user has defined a safe range of [${minVal}] to [${maxVal}].
         setIsSpeaking(null);
         return;
       }
-
       if (!audioContextRef.current) {
         audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       }
-      
       const ctx = audioContextRef.current;
       const bytes = decodeBase64Audio(base64Audio);
       const buffer = await decodeAudioBuffer(bytes, ctx);
       const source = ctx.createBufferSource();
       source.buffer = buffer;
       source.connect(ctx.destination);
-      
-      source.onended = () => {
-        if (isSpeaking === messageId) setIsSpeaking(null);
-      };
-
+      source.onended = () => { if (isSpeaking === messageId) setIsSpeaking(null); };
       currentSourceRef.current = source;
       source.start();
     } catch (err) {
@@ -444,7 +452,7 @@ The user has defined a safe range of [${minVal}] to [${maxVal}].
   };
 
   return (
-    <div className="flex h-screen overflow-hidden">
+    <div className="flex h-screen overflow-hidden bg-slate-950">
       <Sidebar 
         files={files} 
         onUpload={handleFileUpload} 
