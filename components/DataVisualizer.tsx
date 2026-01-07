@@ -1,11 +1,12 @@
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { 
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, 
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Sector
 } from 'recharts';
 import { csvParse } from 'd3-dsv';
 import { FileData } from '../types';
+import { analyzeFiles } from '../services/gemini';
 
 interface DataVisualizerProps {
   file: FileData | null;
@@ -69,6 +70,16 @@ const DataVisualizer: React.FC<DataVisualizerProps> = ({ file, onClose }) => {
   const [columns, setColumns] = useState<string[]>([]);
   const [pieActiveIndex, setPieActiveIndex] = useState<number>(0);
 
+  // Range Filtering States
+  const [minInput, setMinInput] = useState<string>('');
+  const [maxInput, setMaxInput] = useState<string>('');
+  const [activeMin, setActiveMin] = useState<number | null>(null);
+  const [activeMax, setActiveMax] = useState<number | null>(null);
+
+  // AI Trend Analysis States
+  const [aiTrendSummary, setAiTrendSummary] = useState<string>('');
+  const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
+
   useEffect(() => {
     if (file && file.content) {
       try {
@@ -78,7 +89,6 @@ const DataVisualizer: React.FC<DataVisualizerProps> = ({ file, onClose }) => {
           const cols = Object.keys(data[0]);
           setColumns(cols);
           setXAxis(cols[0]);
-          // Find numeric columns
           const numericCols = cols.filter(c => data.some(row => !isNaN(Number(row[c])) && row[c] !== ''));
           const initialMeasure = numericCols.length > 0 ? numericCols[0] : (cols[1] || cols[0]);
           setSelectedMeasures([initialMeasure]);
@@ -89,15 +99,38 @@ const DataVisualizer: React.FC<DataVisualizerProps> = ({ file, onClose }) => {
     }
   }, [file]);
 
+  // Debouncing Range Inputs
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setActiveMin(minInput === '' ? null : parseFloat(minInput));
+      setActiveMax(maxInput === '' ? null : parseFloat(maxInput));
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [minInput, maxInput]);
+
   const chartData = useMemo(() => {
-    return parsedData.map(d => {
+    let data = parsedData.map(d => {
       const row: any = { ...d };
       selectedMeasures.forEach(m => {
         row[m] = parseFloat(d[m]) || 0;
       });
       return row;
-    }).slice(0, 50);
-  }, [parsedData, selectedMeasures]);
+    });
+
+    // Apply Filters
+    if (activeMin !== null || activeMax !== null) {
+      data = data.filter(row => {
+        return selectedMeasures.every(m => {
+          const val = row[m];
+          const passMin = activeMin === null || val >= activeMin;
+          const passMax = activeMax === null || val <= activeMax;
+          return passMin && passMax;
+        });
+      });
+    }
+
+    return data.slice(0, 50);
+  }, [parsedData, selectedMeasures, activeMin, activeMax]);
 
   const handleLegendClick = (o: any) => {
     const { dataKey } = o;
@@ -112,26 +145,51 @@ const DataVisualizer: React.FC<DataVisualizerProps> = ({ file, onClose }) => {
   const toggleMeasure = (col: string) => {
     setSelectedMeasures(prev => {
       if (prev.includes(col)) {
-        if (prev.length === 1) return prev; // Keep at least one
+        if (prev.length === 1) return prev;
         return prev.filter(c => c !== col);
       }
       return [...prev, col];
     });
   };
 
+  const handleAnalyzeTrends = async () => {
+    if (!file) return;
+    setIsAnalyzing(true);
+    setAiTrendSummary('');
+    try {
+      const prompt = `Perform a smart trend analysis on this dataset. 
+      1. Calculate the average range for the selected measures: ${selectedMeasures.join(', ')}.
+      2. Identify specifically where the data has gone up or down significantly (spikes/dips).
+      3. Provide a concise 3-sentence summary of the overall trajectory. 
+      Use professional, data-driven language.`;
+      
+      const response = await analyzeFiles([file], prompt, { useLite: true, isSummaryRequest: true });
+      setAiTrendSummary(response.text || "Unable to determine trends at this time.");
+    } catch (err) {
+      setAiTrendSummary("Analysis failed. Please ensure the file contains valid numeric columns.");
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
   if (!file) return null;
 
   return (
-    <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 md:p-8 bg-slate-900/90 backdrop-blur-md animate-in fade-in duration-300">
+    <div 
+      className="fixed inset-0 z-[110] flex items-center justify-center p-4 md:p-8 bg-slate-900/90 backdrop-blur-md animate-in fade-in duration-300"
+      role="dialog"
+      aria-labelledby="viz-title"
+      aria-modal="true"
+    >
       <div className="bg-white w-full max-w-6xl h-full max-h-[90vh] rounded-3xl shadow-2xl flex flex-col overflow-hidden">
         {/* Header */}
         <div className="flex justify-between items-center p-6 border-b border-slate-100 bg-white">
           <div className="flex items-center gap-4">
-            <div className="w-12 h-12 rounded-2xl flex items-center justify-center text-xl bg-emerald-50 text-emerald-600 border border-emerald-100">
+            <div className="w-12 h-12 rounded-2xl flex items-center justify-center text-xl bg-emerald-50 text-emerald-600 border border-emerald-100" aria-hidden="true">
               <i className="fa-solid fa-chart-column"></i>
             </div>
             <div>
-              <h3 className="text-lg font-bold text-slate-900">Data Visualization</h3>
+              <h3 id="viz-title" className="text-lg font-bold text-slate-900">Data Visualization</h3>
               <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">
                 Source: {file.name}
               </p>
@@ -139,41 +197,78 @@ const DataVisualizer: React.FC<DataVisualizerProps> = ({ file, onClose }) => {
           </div>
           <button 
             onClick={onClose}
-            className="w-10 h-10 flex items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-900 transition-all"
+            className="w-10 h-10 flex items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-900 transition-all focus:ring-2 focus:ring-blue-500 outline-none"
+            aria-label="Close Data Visualizer"
           >
-            <i className="fa-solid fa-xmark text-lg"></i>
+            <i className="fa-solid fa-xmark text-lg" aria-hidden="true"></i>
           </button>
         </div>
 
         <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
           {/* Controls Sidebar */}
-          <div className="w-full md:w-72 border-r border-slate-100 p-6 space-y-6 overflow-y-auto bg-slate-50/50">
+          <aside className="w-full md:w-80 border-r border-slate-100 p-6 space-y-6 overflow-y-auto bg-slate-50/50" aria-label="Chart Controls">
             <div>
               <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3">Chart Type</label>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-3 gap-2" role="group" aria-label="Select Visualization Type">
                 {(['bar', 'line', 'pie'] as const).map(type => (
                   <button
                     key={type}
                     onClick={() => setChartType(type)}
-                    className={`flex flex-col items-center justify-center p-3 rounded-xl border transition-all ${
+                    className={`flex flex-col items-center justify-center p-3 rounded-xl border transition-all focus:ring-2 focus:ring-blue-500 outline-none ${
                       chartType === type 
                         ? 'bg-blue-600 border-blue-600 text-white shadow-md' 
                         : 'bg-white border-slate-200 text-slate-500 hover:border-blue-300'
                     }`}
+                    aria-pressed={chartType === type}
                   >
-                    <i className={`fa-solid fa-chart-${type === 'pie' ? 'pie' : type === 'bar' ? 'column' : 'line'} mb-1`}></i>
+                    <i className={`fa-solid fa-chart-${type === 'pie' ? 'pie' : type === 'bar' ? 'column' : 'line'} mb-1`} aria-hidden="true"></i>
                     <span className="text-[10px] font-bold capitalize">{type}</span>
                   </button>
                 ))}
               </div>
             </div>
 
+            <div className="space-y-4 pt-4 border-t border-slate-200">
+              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Precise Range Filter</label>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <span className="text-[9px] text-slate-400 font-bold uppercase">Min</span>
+                  <input 
+                    type="number" 
+                    value={minInput}
+                    onChange={(e) => setMinInput(e.target.value)}
+                    placeholder="Min"
+                    className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs font-bold text-slate-700 focus:ring-2 focus:ring-blue-500 outline-none"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <span className="text-[9px] text-slate-400 font-bold uppercase">Max</span>
+                  <input 
+                    type="number" 
+                    value={maxInput}
+                    onChange={(e) => setMaxInput(e.target.value)}
+                    placeholder="Max"
+                    className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs font-bold text-slate-700 focus:ring-2 focus:ring-blue-500 outline-none"
+                  />
+                </div>
+              </div>
+              {(minInput !== '' || maxInput !== '') && (
+                <button 
+                  onClick={() => { setMinInput(''); setMaxInput(''); }}
+                  className="text-[9px] font-bold text-blue-500 hover:text-blue-700 transition-colors uppercase tracking-tight"
+                >
+                  Clear Filters
+                </button>
+              )}
+            </div>
+
             <div>
-              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Dimension (X-Axis)</label>
+              <label htmlFor="x-axis-select" className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Dimension (X-Axis)</label>
               <select 
+                id="x-axis-select"
                 value={xAxis}
                 onChange={(e) => setXAxis(e.target.value)}
-                className="w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                className="w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
               >
                 {columns.map(col => <option key={col} value={col}>{col}</option>)}
               </select>
@@ -181,9 +276,9 @@ const DataVisualizer: React.FC<DataVisualizerProps> = ({ file, onClose }) => {
 
             <div>
               <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Measures (Y-Axis)</label>
-              <div className="space-y-2 max-h-48 overflow-y-auto pr-2 scrollbar-hide">
+              <div className="space-y-2 max-h-40 overflow-y-auto pr-2 scrollbar-hide" role="group" aria-label="Toggle Data Measures">
                 {columns.map(col => (
-                  <label key={col} className="flex items-center gap-3 p-2 bg-white rounded-lg border border-slate-100 hover:border-blue-200 cursor-pointer transition-all">
+                  <label key={col} className="flex items-center gap-3 p-2 bg-white rounded-lg border border-slate-100 hover:border-blue-200 cursor-pointer transition-all focus-within:ring-2 focus-within:ring-blue-500">
                     <input 
                       type="checkbox" 
                       checked={selectedMeasures.includes(col)}
@@ -196,18 +291,38 @@ const DataVisualizer: React.FC<DataVisualizerProps> = ({ file, onClose }) => {
               </div>
             </div>
 
-            <div className="pt-4 border-t border-slate-200">
-              <p className="text-[11px] text-slate-400 leading-relaxed">
-                <i className="fa-solid fa-lightbulb text-amber-400 mr-1"></i>
-                Tip: Click legend items on the chart to hide/show data series.
-              </p>
+            <div className="pt-4 border-t border-slate-200 space-y-3">
+              <button 
+                onClick={handleAnalyzeTrends}
+                disabled={isAnalyzing}
+                className="w-full flex items-center justify-center gap-2 bg-slate-900 text-white font-black py-3 rounded-xl hover:bg-blue-600 transition-all shadow-md disabled:bg-slate-200 text-[10px] uppercase tracking-widest"
+              >
+                {isAnalyzing ? (
+                   <i className="fa-solid fa-circle-notch animate-spin"></i>
+                ) : (
+                   <i className="fa-solid fa-wand-magic-sparkles"></i>
+                )}
+                Auto-Analyze Trends
+              </button>
             </div>
-          </div>
+          </aside>
 
           {/* Chart Display Area */}
-          <div className="flex-1 p-8 bg-white flex flex-col min-h-0">
+          <section className="flex-1 p-8 bg-white flex flex-col min-h-0" aria-label="Interactive Chart Display">
+            {aiTrendSummary && (
+              <div className="mb-6 p-4 bg-blue-50 border border-blue-100 rounded-2xl animate-in slide-in-from-top-2">
+                <div className="flex items-center gap-2 mb-2">
+                  <i className="fa-solid fa-sparkles text-blue-500 text-xs"></i>
+                  <span className="text-[10px] font-black text-blue-700 uppercase tracking-widest">AI Trend Insight</span>
+                </div>
+                <p className="text-xs text-blue-800 leading-relaxed font-medium">
+                  {aiTrendSummary}
+                </p>
+              </div>
+            )}
+            
             <div className="flex-1 min-h-0">
-              {parsedData.length > 0 ? (
+              {chartData.length > 0 ? (
                 <ResponsiveContainer width="100%" height="100%">
                   {chartType === 'bar' ? (
                     <BarChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 60 }}>
@@ -291,26 +406,28 @@ const DataVisualizer: React.FC<DataVisualizerProps> = ({ file, onClose }) => {
                 </ResponsiveContainer>
               ) : (
                 <div className="h-full flex flex-col items-center justify-center text-slate-400">
-                  <i className="fa-solid fa-table text-5xl mb-4 opacity-20"></i>
-                  <p className="font-medium">No valid tabular data found to visualize.</p>
+                  <i className="fa-solid fa-filter-circle-xmark text-5xl mb-4 opacity-20" aria-hidden="true"></i>
+                  <p className="font-medium">No results match your filters.</p>
+                  <button onClick={() => { setMinInput(''); setMaxInput(''); }} className="mt-4 text-blue-500 font-bold text-xs uppercase underline">Reset Filters</button>
                 </div>
               )}
             </div>
-          </div>
+          </section>
         </div>
 
         {/* Footer */}
-        <div className="p-4 bg-slate-50 border-t border-slate-100 flex justify-between items-center">
-          <p className="text-[10px] text-slate-400 font-medium px-2">
-            Interactive visualization powered by OmniDoc Engine
+        <footer className="p-4 bg-slate-50 border-t border-slate-100 flex justify-between items-center">
+          <p className="text-[10px] text-slate-400 font-medium px-2 italic">
+            <i className="fa-solid fa-chart-area mr-1"></i>
+            Showing {chartData.length} entries of {parsedData.length} total.
           </p>
           <button 
             onClick={onClose}
-            className="px-6 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl font-bold text-sm transition-all"
+            className="px-6 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl font-bold text-sm transition-all focus:ring-2 focus:ring-slate-400 outline-none"
           >
             Close Viewer
           </button>
-        </div>
+        </footer>
       </div>
     </div>
   );

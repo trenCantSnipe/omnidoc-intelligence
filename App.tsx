@@ -165,6 +165,22 @@ const App: React.FC = () => {
     }
   };
 
+  const handleClearHistory = () => {
+    if (window.confirm("Are you sure you want to clear all chat history? This action is permanent.")) {
+      setHistory([]);
+      localStorage.removeItem(STORAGE_KEY);
+      createNewSession();
+    }
+  };
+
+  const handleClearCurrentChat = () => {
+    if (window.confirm("Clear the current conversation and workspace?")) {
+      setMessages([]);
+      setFiles([]);
+      stopAudio();
+    }
+  };
+
   const handleShareSession = (id?: string) => {
     const targetId = id || currentSessionId;
     const session = history.find(s => s.id === targetId);
@@ -466,6 +482,7 @@ const App: React.FC = () => {
         onNewSession={createNewSession}
         onSelectSession={handleSelectSession}
         onDeleteSession={handleDeleteSession}
+        onClearHistory={handleClearHistory}
         onShareSession={handleShareSession}
       />
       <ChatArea 
@@ -489,6 +506,7 @@ const App: React.FC = () => {
         onSaveTemplate={handleSaveTemplate}
         onDeleteTemplate={handleDeleteTemplate}
         onShareSession={() => handleShareSession()}
+        onClearCurrentChat={handleClearCurrentChat}
       />
       <FilePreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />
       <DataVisualizer file={visualizingFile} onClose={() => setVisualizingFile(null)} />
