@@ -9,10 +9,11 @@ systems. It does not replace them. It watches what they emit, works out what *ch
 
 ```
 npm install
-npm test            # 62 tests
+npm test            # 80 tests
 npm run typecheck
 npm run demo        # onboards a simulated 80-room hotel and prints the morning brief
 npm run demo -- --llm   # same, narrated by Claude (needs ANTHROPIC_API_KEY)
+npm run serve       # run as a long-lived service (see "Running it as a service")
 ```
 
 ## What the demo shows
@@ -65,6 +66,29 @@ gets the pricing opportunity in their inbox; the GM is pushed only the critical 
 | Copilot | `src/copilot` | Intent routing to deterministic analyses; optional `AnthropicNarrator` rephrases using only those facts and falls back to the draft on any error/refusal |
 | Historical memory | `src/memory` | Episode recall ("last time occupancy hit 90%"), similar situations, action-outcome evaluation |
 
+## Running it as a service
+
+```
+HOTEL_API_TOKEN=... WEBHOOK_SECRETS='{"pms.webhook":"..."}' JOURNAL_PATH=./data/journal.jsonl \
+HOTEL_PROFILE=./profile.json npm run serve
+```
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `POST /webhooks/:adapterId` | HMAC-SHA256 of the raw body in `X-Signature` (per-adapter secret; **no secret configured → rejected**) | live events from the PMS / meters / feeds |
+| `POST /ingest/:adapterId` | bearer | bulk import (`text/csv` or JSON) |
+| `POST /days/:date/close` | bearer | analyse a business day (also runs automatically for yesterday once the hotel's local clock passes 01:00, with bounded catch-up after downtime) |
+| `GET /briefs/:date?role=&format=markdown` | bearer | morning brief, optionally per role |
+| `POST /ask` | bearer | copilot |
+| `GET /recommendations`, `POST /recommendations/:id/approve\|reject` | bearer | human approval workflow |
+| `GET /health` | none | liveness |
+
+**Durability** is an append-only journal (`src/persistence`) of normalized observations, day-close markers and approval
+decisions. Because every conclusion is a deterministic function of those, recovery is a replay: a restart reproduces the
+same briefs and approval states (tested), and replay **never re-executes** actions such as an automated price push.
+Observations are journaled before they are processed, a torn final line from a crash is dropped, and corruption anywhere
+else is a hard error rather than silently skipped. Webhook retries stay idempotent across restarts.
+
 ## Design decisions worth knowing
 
 - **Two gates, not one.** A 30% swing in a metric that normally moves 40% is noise; a 6% swing in a metric
@@ -95,8 +119,10 @@ hotel. Thresholds (`zActionable=3`, per-metric effect sizes in `baseline/metricS
 
 ## Not built yet (honest list)
 
-- **Persistence.** Stores are in-memory behind small interfaces (`EventStore`, `MetricStore`, `StateStore`); swap in a
-  database/stream for production. No multi-tenant auth or per-hotel isolation yet.
+- **Scale-out and tenancy.** The journal is a single local file and startup replays all of it (milliseconds for the demo
+  hotel; add snapshots before years of history). One process serves one hotel; there is no multi-tenant isolation, no
+  per-user identity (the approver's name is supplied by the caller behind one shared API token), no rate limiting, and TLS
+  is expected to be terminated in front of it.
 - **Real vendor adapters.** Generic CSV + example PMS/meter/rate-shop JSON mappings only. Each real PMS/channel manager
   needs its own mapping (small by design) and credentials handling.
 - **Data collection.** Competitor/OTA rate *collection* (scraping/rate-shopping APIs), weather and local-event feeds are

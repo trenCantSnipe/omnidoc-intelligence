@@ -42,12 +42,32 @@ export interface AuditEntry {
 export class ApprovalWorkflow {
   private recs = new Map<string, Recommendation>();
   readonly audit: AuditEntry[] = [];
+  private replaying = false;
 
   constructor(
     private executor: ActionExecutor = new DryRunExecutor(),
     private rules: AutomationRule[] = [],
     private clock: () => number = Date.now,
+    /** Called after every state change; the platform uses it to journal decisions durably. */
+    private onTransition?: (e: AuditEntry) => void,
   ) {}
+
+  /**
+   * While replaying a journal, recommendations are only registered: no automation rule fires and no
+   * executor is called, because those actions already happened in the original run. Their recorded
+   * outcomes are applied with `restore`. Re-executing a price push on every restart would be a bug.
+   */
+  setReplaying(on: boolean): void {
+    this.replaying = on;
+  }
+
+  /** Re-applies a journaled transition without side effects. */
+  restore(entry: AuditEntry): void {
+    const r = this.recs.get(entry.recommendationId);
+    if (!r) throw new Error(`Journal refers to unknown recommendation ${entry.recommendationId}`);
+    r.status = entry.to;
+    this.audit.push(entry);
+  }
 
   /** Registers new recommendations; auto-executes those matching an enabled rule. Re-submitting is idempotent. */
   async submit(recs: Recommendation[]): Promise<Recommendation[]> {
@@ -60,7 +80,7 @@ export class ApprovalWorkflow {
       }
       this.recs.set(r.id, r);
       out.push(r);
-      if (this.eligibleForAutomation(r)) await this.run(r, 'automation-rule', 'auto_executed');
+      if (!this.replaying && this.eligibleForAutomation(r)) await this.run(r, 'automation-rule', 'auto_executed');
     }
     return out;
   }
@@ -115,7 +135,9 @@ export class ApprovalWorkflow {
   }
 
   private transition(r: Recommendation, actor: string, to: Recommendation['status'], note?: string): void {
-    this.audit.push({ at: this.clock(), recommendationId: r.id, actor, from: r.status, to, note });
+    const entry: AuditEntry = { at: this.clock(), recommendationId: r.id, actor, from: r.status, to, note };
+    this.audit.push(entry);
     r.status = to;
+    this.onTransition?.(entry);
   }
 }

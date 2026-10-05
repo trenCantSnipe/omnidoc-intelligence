@@ -6,6 +6,7 @@ import { ContextEngine } from './context/contextEngine';
 import { Copilot, type Answer } from './copilot/copilot';
 import { PlainNarrator, type Narrator } from './copilot/narrator';
 import { ApprovalWorkflow, DryRunExecutor, type ActionExecutor, type AutomationRule } from './decision/approval';
+import type { JournalEntry, JournalSink } from './persistence/journal';
 import { DecisionEngine } from './decision/decisionEngine';
 import { deriveDailyMetrics } from './detection/aggregator';
 import { ChangeDetector } from './detection/changeDetector';
@@ -28,6 +29,8 @@ export interface PlatformOptions {
   alertCooldownDays?: number;
   baseline?: Partial<BaselineConfig>;
   anomaly?: Partial<AnomalyConfig>;
+  /** Durable record of everything that changes state; see persistence/journal.ts. */
+  journal?: JournalSink;
 }
 
 export interface IngestResult {
@@ -64,6 +67,8 @@ export class HotelIntelligence {
   private reports = new Map<DateKey, DayReport>();
   private latest: DateKey | null = null;
   private seenAdditive = new Set<string>();
+  private journal?: JournalSink;
+  private replaying = false;
 
   constructor(
     readonly profile: HotelProfile,
@@ -75,7 +80,10 @@ export class HotelIntelligence {
     this.detector = new ChangeDetector(profile, this.state);
     this.context = new ContextEngine(profile, this.metrics, this.events, this.state, this.baseline);
     this.decisions = new DecisionEngine(profile, this.state);
-    this.approvals = new ApprovalWorkflow(opts.executor ?? new DryRunExecutor(), opts.automation ?? []);
+    this.journal = opts.journal;
+    this.approvals = new ApprovalWorkflow(opts.executor ?? new DryRunExecutor(), opts.automation ?? [], Date.now, (entry) => {
+      if (!this.replaying) this.journal?.append({ t: 'audit', entry });
+    });
     this.alertManager = new AlertManager(opts.alertCooldownDays);
     this.memory = new HistoricalMemory(this.metrics, this.events, this.baseline);
     this.copilot = new Copilot(
@@ -100,6 +108,9 @@ export class HotelIntelligence {
   }
 
   ingestObservations(observations: Observation[]): IngestResult {
+    // Journal the normalized observations (not the vendor payloads), so a later change to an adapter
+    // cannot alter what history means. Written before processing: input is never lost to a crash.
+    if (!this.replaying && observations.length) this.journal?.append({ t: 'obs', obs: observations });
     const tz = this.profile.tzOffsetMinutes;
     const sorted = [...observations].sort((a, b) => a.ts - b.ts);
     const touched = new Set<DateKey>();
@@ -134,6 +145,8 @@ export class HotelIntelligence {
   /* ----------------------------- analysis ---------------------------- */
 
   async closeDay(date: DateKey): Promise<DayReport> {
+    // Marker goes in first so audit entries produced by this close (automation) follow it in the journal.
+    if (!this.replaying) this.journal?.append({ t: 'close', date });
     deriveDailyMetrics(date, this.profile, this.events, this.metrics);
 
     const evaluations: Anomaly[] = [];
@@ -172,6 +185,34 @@ export class HotelIntelligence {
   /** Replays a date range in order, building the history that baselines, memory and alert cooldowns depend on. */
   async backfill(from: DateKey, to: DateKey): Promise<void> {
     for (const d of dateRange(from, to)) await this.closeDay(d);
+  }
+
+  /**
+   * Rebuilds state from a journal. All conclusions are recomputed deterministically from the recorded
+   * observations; recorded approval decisions are re-applied without executing anything.
+   */
+  async restore(entries: JournalEntry[]): Promise<void> {
+    this.replaying = true;
+    this.approvals.setReplaying(true);
+    try {
+      for (const e of entries) {
+        if (e.t === 'obs') this.ingestObservations(e.obs);
+        else if (e.t === 'close') await this.closeDay(e.date);
+        else this.approvals.restore(e.entry);
+      }
+    } finally {
+      this.replaying = false;
+      this.approvals.setReplaying(false);
+    }
+  }
+
+  isClosed(date: DateKey): boolean {
+    return this.reports.has(date);
+  }
+
+  /** True when any data arrived for the date; closing a day with no data would only record emptiness. */
+  hasData(date: DateKey): boolean {
+    return this.events.query({ fromDate: date, toDate: date }).length > 0 || this.metrics.get('occupancy_pct', date) !== undefined;
   }
 
   report(date: DateKey): DayReport | undefined {
