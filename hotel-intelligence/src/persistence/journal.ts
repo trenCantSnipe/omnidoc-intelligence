@@ -12,7 +12,9 @@ import type { DateKey, Observation } from '../types';
 export type JournalEntry =
   | { t: 'obs'; obs: Observation[] }
   | { t: 'close'; date: DateKey }
-  | { t: 'audit'; entry: AuditEntry };
+  | { t: 'audit'; entry: AuditEntry }
+  /** A notification that was sent. Read by the delivery service, ignored when rebuilding analysis state. */
+  | { t: 'delivered'; key: string };
 
 export interface JournalSink {
   append(entry: JournalEntry): void;

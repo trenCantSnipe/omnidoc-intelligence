@@ -5,7 +5,9 @@ import { registerStandardAdapters } from '../integration/standard';
 import { FileJournal } from '../persistence/journal';
 import { HotelIntelligence } from '../platform';
 import type { HotelProfile } from '../types';
-import { closeDueDays, createService } from './server';
+import { buildDelivery } from '../delivery/config';
+import { DeliveryService } from '../delivery/deliveryService';
+import { createService, runDailyCycle } from './server';
 
 /**
  * Runs the platform for one hotel as a long-lived service.
@@ -15,6 +17,7 @@ import { closeDueDays, createService } from './server';
  *   HOTEL_PROFILE     path to a HotelProfile JSON file (defaults to the demo hotel, with a warning)
  *   JOURNAL_PATH      append-only journal (default ./data/journal.jsonl)
  *   PORT              default 8080
+ *   DELIVERY_CONFIG   path to a JSON file of notifiers + routes (Slack / signed webhooks); omit to disable delivery
  *   USE_LLM=1         narrate answers/briefs with Claude (needs ANTHROPIC_API_KEY)
  */
 const main = async (): Promise<void> => {
@@ -40,11 +43,18 @@ const main = async (): Promise<void> => {
     `restored ${entries.length} journal entries in ${Date.now() - started}ms (asOf ${hotel.asOf ?? 'none'}, ${hotel.events.size} events)${droppedPartialTail ? '; dropped a torn final line' : ''}`,
   );
 
-  const server = createService(hotel, { apiToken, webhookSecrets: JSON.parse(process.env.WEBHOOK_SECRETS ?? '{}') as Record<string, string> });
+  let delivery: DeliveryService | undefined;
+  if (process.env.DELIVERY_CONFIG) {
+    const { notifiers, routes } = buildDelivery(JSON.parse(readFileSync(process.env.DELIVERY_CONFIG, 'utf8')));
+    delivery = new DeliveryService(hotel, notifiers, routes, { journal, delivered: DeliveryService.deliveredKeys(entries), log: console.error });
+    console.log(`delivery enabled: ${routes.length} route(s) via ${Object.keys(notifiers).join(', ')}`);
+  }
+
+  const server = createService(hotel, { apiToken, webhookSecrets: JSON.parse(process.env.WEBHOOK_SECRETS ?? '{}') as Record<string, string>, delivery, log: console.error });
   const tick = (): void => {
-    closeDueDays(hotel, Date.now()).then(
-      (days) => days.length && console.log(`closed days: ${days.join(', ')}`),
-      (e) => console.error('day close failed', e),
+    runDailyCycle(hotel, delivery, Date.now()).then(
+      (r) => (r.closed.length || r.sent || r.failed) && console.log(`closed: ${r.closed.join(', ') || '-'}; delivered ${r.sent}, failed ${r.failed}`),
+      (e) => console.error('daily cycle failed', e),
     );
   };
   setInterval(tick, 60_000).unref();

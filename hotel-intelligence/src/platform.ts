@@ -198,12 +198,17 @@ export class HotelIntelligence {
       for (const e of entries) {
         if (e.t === 'obs') this.ingestObservations(e.obs);
         else if (e.t === 'close') await this.closeDay(e.date);
-        else this.approvals.restore(e.entry);
+        else if (e.t === 'audit') this.approvals.restore(e.entry);
+        // 'delivered' entries belong to the delivery service; restoring analysis never notifies anyone
       }
     } finally {
       this.replaying = false;
       this.approvals.setReplaying(false);
     }
+  }
+
+  closedDates(): DateKey[] {
+    return [...this.reports.keys()].sort();
   }
 
   isClosed(date: DateKey): boolean {

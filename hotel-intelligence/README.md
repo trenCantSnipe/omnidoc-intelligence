@@ -9,7 +9,7 @@ systems. It does not replace them. It watches what they emit, works out what *ch
 
 ```
 npm install
-npm test            # 80 tests
+npm test            # 94 tests
 npm run typecheck
 npm run demo        # onboards a simulated 80-room hotel and prints the morning brief
 npm run demo -- --llm   # same, narrated by Claude (needs ANTHROPIC_API_KEY)
@@ -70,7 +70,7 @@ gets the pricing opportunity in their inbox; the GM is pushed only the critical 
 
 ```
 HOTEL_API_TOKEN=... WEBHOOK_SECRETS='{"pms.webhook":"..."}' JOURNAL_PATH=./data/journal.jsonl \
-HOTEL_PROFILE=./profile.json npm run serve
+HOTEL_PROFILE=./profile.json DELIVERY_CONFIG=./delivery.json npm run serve
 ```
 
 | Endpoint | Auth | Purpose |
@@ -81,6 +81,7 @@ HOTEL_PROFILE=./profile.json npm run serve
 | `GET /briefs/:date?role=&format=markdown` | bearer | morning brief, optionally per role |
 | `POST /ask` | bearer | copilot |
 | `GET /recommendations`, `POST /recommendations/:id/approve\|reject` | bearer | human approval workflow |
+| `POST /days/:date/deliver` | bearer | (re)send a closed day's notifications; already-sent messages are skipped |
 | `GET /health` | none | liveness |
 
 **Durability** is an append-only journal (`src/persistence`) of normalized observations, day-close markers and approval
@@ -88,6 +89,28 @@ decisions. Because every conclusion is a deterministic function of those, recove
 same briefs and approval states (tested), and replay **never re-executes** actions such as an automated price push.
 Observations are journaled before they are processed, a torn final line from a crash is dropped, and corruption anywhere
 else is a hard error rather than silently skipped. Webhook retries stay idempotent across restarts.
+
+### Delivery
+
+`DELIVERY_CONFIG` is a JSON file of named notifiers and role routes:
+
+```json
+{ "notifiers": { "ops-slack": { "type": "slack", "url": "https://hooks.slack.com/services/…" },
+                 "gm-gateway": { "type": "webhook", "url": "https://…", "secret": "…" } },
+  "routes": [ { "role": "operations", "notifier": "ops-slack" }, { "role": "general_manager", "notifier": "gm-gateway" } ] }
+```
+
+Per role and day: **critical + relevant alerts are pushed individually**, "review today" items go out as one grouped message,
+and **every role gets its own morning brief** (also on quiet days, so silence means "all normal" rather than "system down").
+`webhook` notifiers POST the message as JSON with an HMAC `X-Signature`, so a WhatsApp/email/Teams gateway can sit behind them.
+
+- **No re-notification.** Delivery is separate from analysis: rebuilding state from the journal never sends anything. Each message
+  has an idempotency key written to the journal after a successful send, so retries, restarts and a timer racing the API don't duplicate.
+- **Failure isolation.** Transient errors (network, 5xx, 429) are retried with backoff; other 4xx are permanent and not retried.
+  A broken channel doesn't block the others, and its messages are retried on the next cycle (which also covers a crash or outage).
+- **Secrets stay secret.** Webhook URLs are credentials: they are validated on load but never appear in logs or error messages.
+- **Guarantee.** At-least-once: if the process dies in the instant between a send succeeding and its journal write, that one
+  message can be sent again on restart. Only recent days (default: the last 2) are ever re-delivered, so an old backfill is never mailed out.
 
 ## Design decisions worth knowing
 
@@ -131,6 +154,9 @@ hotel. Thresholds (`zActionable=3`, per-metric effect sizes in `baseline/metricS
   expectations) is the natural next step; change *events* are already real-time.
 - **Forecasting.** Demand/revenue forecasting, cancellation prediction, elasticity learning, predictive maintenance:
   the history and outcome tracking exist, the models don't. Pricing uses a transparent heuristic, not a learned model.
-- **Delivery channels.** Routing decides *who gets what and how urgently*; WhatsApp/Slack/Teams/email senders are not wired.
+- **Richer delivery.** Slack incoming webhooks and a signed generic webhook exist; there are no native WhatsApp/email/Teams
+  senders, no per-person preferences or quiet hours, no acknowledgement/escalation tracking, and no interactive
+  "approve" buttons (approvals still go through the API). The webhook config file contains secrets: keep it out of version
+  control and restrict its file permissions.
 - **Live LLM path.** `AnthropicNarrator` is unit-tested with a fake client (success, error, refusal, empty). It has
   **not** been run against the live API in this environment (no key); the deterministic path is what the tests and demo exercise.

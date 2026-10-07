@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { verifyWebhookSignature } from '../integration/jsonAdapters';
+import type { DeliveryService } from '../delivery/deliveryService';
 import type { HotelIntelligence } from '../platform';
 import { renderBriefMarkdown } from '../briefing/dailyBrief';
 import type { DateKey, Role } from '../types';
@@ -14,6 +15,9 @@ export interface ServiceConfig {
   maxBodyBytes?: number;
   /** Close yesterday once the hotel's local clock passes this hour. */
   closeAfterLocalHour?: number;
+  /** When set, closed days are delivered to the configured channels. */
+  delivery?: DeliveryService;
+  log?: (message: string) => void;
 }
 
 class HttpError extends Error {
@@ -97,6 +101,17 @@ export const closeDueDays = async (hotel: HotelIntelligence, now: number, closeA
   return closed;
 };
 
+/**
+ * One tick of the daily cycle: close what is due, then deliver those days plus anything left
+ * undelivered from earlier (outage, crash, failed channel). Idempotent; call it on a timer.
+ */
+export const runDailyCycle = async (hotel: HotelIntelligence, delivery: DeliveryService | undefined, now: number, closeAfterLocalHour = 1): Promise<{ closed: DateKey[]; sent: number; failed: number }> => {
+  const closed = await closeDueDays(hotel, now, closeAfterLocalHour);
+  if (!delivery) return { closed, sent: 0, failed: 0 };
+  const s = await delivery.deliverPending(now);
+  return { closed, sent: s.sent, failed: s.failed.length };
+};
+
 export const createService = (hotel: HotelIntelligence, config: ServiceConfig): Server => {
   if (!config.apiToken) throw new Error('apiToken is required');
   const limit = config.maxBodyBytes ?? 1_048_576;
@@ -153,7 +168,16 @@ export const createService = (hotel: HotelIntelligence, config: ServiceConfig): 
     if (method === 'POST' && parts[0] === 'days' && parts[2] === 'close' && parts.length === 3) {
       const date = dateParam(parts[1]);
       const report = await exclusive(() => hotel.closeDay(date));
+      // Notify in the background: a slow or broken channel must not make the close request fail.
+      config.delivery?.deliverDay(date).catch((e: unknown) => config.log?.(`delivery error: ${e instanceof Error ? e.message : 'unknown'}`));
       return send(res, 200, { date, situations: report.situations.length, surfaced: report.surfaced.length, recommendations: report.recommendations.length });
+    }
+
+    if (method === 'POST' && parts[0] === 'days' && parts[2] === 'deliver' && parts.length === 3) {
+      const date = dateParam(parts[1]);
+      if (!config.delivery) throw new HttpError(409, 'delivery is not configured');
+      if (!hotel.isClosed(date)) throw new HttpError(404, `day ${date} has not been closed`);
+      return send(res, 200, await config.delivery.deliverDay(date));
     }
 
     if (method === 'GET' && parts[0] === 'briefs' && parts.length === 2) {
