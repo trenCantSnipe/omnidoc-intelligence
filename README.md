@@ -1,20 +1,27 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# 📄 OmniDoc Intelligence
 
-# Run and deploy your AI Studio app
+Drop in documents, datasets, images, audio or video, and OmniDoc summarizes and analyzes them, charts the numbers, and can read the summary back to you.
 
-This contains everything you need to run your app locally.
+## Features
 
-View your app in AI Studio: https://ai.studio/apps/drive/1_4cuRxC-cg6VMyict53EVod7Fcb-yc0T
+- **Multi-format input**: PDFs, text, CSV/spreadsheets, images, audio and video (sent as inline data to Gemini)
+- **Automatic language detection** and summaries in your language
+- **Data visualizer**: turns extracted figures into charts (Recharts)
+- **Audio transcription** and **text-to-speech** read-back
+- **Search-grounded follow-ups** to check claims against the web
+- File preview modal and chat-style history sidebar
 
-## Run Locally
+## Tech stack
 
-**Prerequisites:**  Node.js
+React 19 · TypeScript · Vite · Recharts · Google Gemini API (multimodal, TTS, grounding)
 
+## Run locally
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+```bash
+git clone https://github.com/trenCantSnipe/omnidoc-intelligence.git && cd omnidoc-intelligence
+npm install
+echo "GEMINI_API_KEY=your_key_here" > .env.local
+npm run dev
+```
+
+Get a free key at [Google AI Studio](https://aistudio.google.com/apikey). The key stays in `.env.local`, which is git-ignored.
